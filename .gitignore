@@ -1,0 +1,28 @@
+# Entorno virtual
+venv/
+.venv/
+env/
+
+# Pesos de modelos binarios (>100MB excede el límite de GitHub; usar download_models.py)
+*.pt
+
+# Salidas procesadas (se preserva la carpeta con .gitkeep)
+outputs/*
+!outputs/.gitkeep
+
+# Muestras temporales
+samples/raw_temp_*.mp4
+samples/output_video.mp4
+
+# Python y caché
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+.DS_Store
