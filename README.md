@@ -9,6 +9,7 @@ Incluye una interfaz web en navegador (**Gradio**) con soporte para detección g
 ## ✨ Características
 
 - **Soporte completo de YOLO26:** Variantes `nano`, `small`, `medium`, `large` y `extra-large` (`n`, `s`, `m`, `l`, `x`), así como segmentación (`-seg`) y posturas (`-pose`).
+- **🌍 Detección de Vocabulario Abierto (YOLO-World):** Permite detectar y contar cualquier clase arbitraria mediante texto libre (ej: *"box, coffee box, package, bottle"*), ideal para conteo de productos en góndolas y supermercados.
 - **👥 Modo Conteo de Personas:**
   - **En imagen:** Detección y conteo con cartel OSD superpuesto.
   - **En vídeo:** Conteo simultáneo de personas presentes en cuadro y **total acumulado de personas únicas** mediante algoritmos de tracking (`model.track` con `lapx` / ByteTrack).
@@ -92,6 +93,7 @@ Una vez iniciado, abre en tu navegador:
 ├── requirements.txt        # Dependencias de Python
 ├── samples/                # Imágenes de prueba para demostración rápida
 │   ├── bus.jpg
+│   ├── cafe_gondola.png
 │   └── zidane.jpg
 └── outputs/                # Carpeta donde se guardan automáticamente las imágenes/vídeos procesados
 ```

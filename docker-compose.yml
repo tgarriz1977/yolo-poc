@@ -9,8 +9,14 @@ services:
     ports:
       - "7860:7860"
     volumes:
-      # Los vídeos e imágenes procesados se guardan directamente en el host
+      # Guardar salidas en el host
       - ./outputs:/app/outputs
+      # Montar app.py y muestras en vivo
+      - ./app.py:/app/app.py
+      - ./samples:/app/samples
+      # Montar modelos YOLO-World predescargados
+      - ./yolov8s-worldv2.pt:/app/yolov8s-worldv2.pt
+      - ./yolov8m-worldv2.pt:/app/yolov8m-worldv2.pt
     deploy:
       resources:
         reservations:

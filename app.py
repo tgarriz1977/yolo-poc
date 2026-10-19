@@ -1,6 +1,6 @@
 """
-YOLO26 Web UI - Inferencia interactiva en navegador con aceleración NVIDIA RTX 3060 (12 GB)
-Estilos de alto contraste adaptados al modo oscuro para máxima legibilidad.
+YOLO26 & YOLO-World Web UI - Inferencia interactiva en navegador con aceleración NVIDIA RTX 3060 (12 GB)
+Soporte para YOLO26 estándar, Conteo de Personas con Tracking, y YOLO-World (Vocabulario Abierto con texto libre para contar cajas, productos, etc.).
 """
 import os
 import time
@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import torch
 import gradio as gr
-from ultralytics import YOLO
+from ultralytics import YOLO, YOLOWorld
 
 OUTPUTS_DIR = os.getenv("OUTPUTS_DIR", "/mnt/disk/yolo/outputs")
 SAMPLES_DIR = os.getenv("SAMPLES_DIR", "/mnt/disk/yolo/samples")
@@ -19,12 +19,15 @@ os.makedirs(OUTPUTS_DIR, exist_ok=True)
 LOADED_MODELS = {}
 
 AVAILABLE_MODELS = [
-    # Detección de objetos
+    # Modelos YOLO26 estándar (Detección COCO)
     "yolo26n.pt",
     "yolo26s.pt",
     "yolo26m.pt",
     "yolo26l.pt",
     "yolo26x.pt",
+    # Modelos de Vocabulario Abierto (YOLO-World: escribe cualquier texto para contar)
+    "yolov8s-worldv2.pt",
+    "yolov8m-worldv2.pt",
     # Segmentación por instancias
     "yolo26n-seg.pt",
     "yolo26s-seg.pt",
@@ -42,7 +45,10 @@ AVAILABLE_MODELS = [
 def get_model(model_name: str):
     if model_name not in LOADED_MODELS:
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model = YOLO(model_name)
+        if "world" in model_name.lower():
+            model = YOLOWorld(model_name)
+        else:
+            model = YOLO(model_name)
         model.to(device)
         LOADED_MODELS[model_name] = model
     return LOADED_MODELS[model_name]
@@ -70,7 +76,7 @@ def draw_osd_banner(img_bgr, text_lines):
     
     pad = 12
     line_h = 28
-    box_w = min(max(int(w * 0.38), 340), w - 30)
+    box_w = min(max(int(w * 0.40), 340), w - 30)
     box_h = pad * 2 + len(text_lines) * line_h
     
     cv2.rectangle(overlay, (15, 15), (15 + box_w, 15 + box_h), (25, 28, 36), -1)
@@ -82,7 +88,7 @@ def draw_osd_banner(img_bgr, text_lines):
         cv2.putText(img_bgr, line, (25, y), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (236, 239, 244), 2, cv2.LINE_AA)
     return img_bgr
 
-def predict_image(image, model_name, conf_threshold, iou_threshold, imgsz, filter_people):
+def predict_image(image, model_name, conf_threshold, iou_threshold, imgsz, filter_people, custom_classes_txt):
     if image is None:
         status_html = '''
         <div style="background-color: #2a2111; border: 1.5px solid #d97706; border-radius: 8px; padding: 12px 16px; color: #fbbf24; font-weight: bold;">
@@ -93,7 +99,18 @@ def predict_image(image, model_name, conf_threshold, iou_threshold, imgsz, filte
     
     model = get_model(model_name)
     device = 0 if torch.cuda.is_available() else "cpu"
-    classes_filter = [0] if filter_people else None
+    is_world_model = "world" in model_name.lower()
+    
+    # Configurar clases para YOLO-World o YOLO estándar
+    classes_filter = None
+    if is_world_model:
+        if custom_classes_txt and custom_classes_txt.strip():
+            user_classes = [c.strip() for c in custom_classes_txt.split(",") if c.strip()]
+        else:
+            user_classes = ["box", "coffee box", "package"]
+        model.set_classes(user_classes)
+    elif filter_people:
+        classes_filter = [0]
     
     t_start = time.perf_counter()
     results = model.predict(
@@ -125,7 +142,10 @@ def predict_image(image, model_name, conf_threshold, iou_threshold, imgsz, filte
             if cname == 'person':
                 person_count += 1
                 
-    if filter_people:
+    # Agregar banner OSD en la imagen
+    if is_world_model:
+        draw_osd_banner(annotated_bgr, [f"Objetos detectados: {num_boxes}"])
+    elif filter_people:
         draw_osd_banner(annotated_bgr, [f"Personas detectadas: {person_count}"])
     elif person_count > 0:
         draw_osd_banner(annotated_bgr, [f"Personas: {person_count} | Total obj: {num_boxes}"])
@@ -135,17 +155,15 @@ def predict_image(image, model_name, conf_threshold, iou_threshold, imgsz, filte
     # Guardar en disco
     ts = time.strftime("%Y%m%d_%H%M%S")
     m_clean = model_name.replace(".pt", "")
-    tag = "_personas" if filter_people else ""
-    saved_img_path = os.path.join(OUTPUTS_DIR, f"img_{ts}_{m_clean}{tag}.jpg")
+    saved_img_path = os.path.join(OUTPUTS_DIR, f"img_{ts}_{m_clean}.jpg")
     cv2.imwrite(saved_img_path, annotated_bgr)
     
     summary = [
         f"⚡ **Inferencia:** {elapsed_ms:.2f} ms ({fps:.1f} FPS)",
-        f"👥 **Personas detectadas:** **{person_count}**",
-        f"🎯 **Objetos totales:** {num_boxes}",
+        f"🎯 **Objetos detectados:** **{num_boxes}**",
         f"📁 **Guardado en disco:** `{saved_img_path}`"
     ]
-    if counts and not filter_people:
+    if counts:
         summary.append("\n**Detalle por clase:**")
         for k, v in sorted(counts.items(), key=lambda x: -x[1]):
             summary.append(f"- **{k}:** {v}")
@@ -158,8 +176,8 @@ def predict_image(image, model_name, conf_threshold, iou_threshold, imgsz, filte
             <span style="font-size: 13px; color: #a7f3d0; background: #14351e; padding: 2px 8px; border-radius: 4px; font-weight: 600;">{hora_actual}</span>
         </div>
         <div style="font-size: 15px; color: #f8fafc; margin-bottom: 6px; font-weight: 500;">
-            👥 <b style="color: #4ade80; font-size: 17px;">Personas detectadas: {person_count}</b> 
-            <span style="color: #cbd5e1;">| Total objetos: {num_boxes} (en {elapsed_ms:.1f} ms)</span>
+            📦 <b style="color: #4ade80; font-size: 17px;">Total elementos contados: {num_boxes}</b> 
+            <span style="color: #cbd5e1;">(en {elapsed_ms:.1f} ms)</span>
         </div>
         <div style="font-size: 12px; color: #94a3b8; word-break: break-all;">
             💾 <span style="color: #cbd5e1;">Guardado en:</span> <code style="background: #020617; color: #38bdf8; padding: 2px 6px; border-radius: 4px; font-weight: 600;">{saved_img_path}</code>
@@ -167,10 +185,10 @@ def predict_image(image, model_name, conf_threshold, iou_threshold, imgsz, filte
     </div>
     '''
     
-    gr.Info(f"👥 {person_count} persona(s) detectada(s) en {elapsed_ms:.1f} ms")
+    gr.Info(f"🎯 {num_boxes} elemento(s) detectado(s) en {elapsed_ms:.1f} ms")
     return annotated_rgb, status_html, "\n".join(summary), saved_img_path, get_gpu_stats()
 
-def predict_video(video_path, model_name, conf_threshold, iou_threshold, imgsz, filter_people, enable_tracking):
+def predict_video(video_path, model_name, conf_threshold, iou_threshold, imgsz, filter_people, enable_tracking, custom_classes_txt):
     if not video_path:
         status_html = '''
         <div style="background-color: #2a2111; border: 1.5px solid #d97706; border-radius: 8px; padding: 12px 16px; color: #fbbf24; font-weight: bold;">
@@ -182,14 +200,24 @@ def predict_video(video_path, model_name, conf_threshold, iou_threshold, imgsz, 
         
     init_html = '''
     <div style="background: #18202f; border: 1.5px solid #3b82f6; border-radius: 8px; padding: 14px 18px; color: #93c5fd;">
-        <div style="font-weight: 700; font-size: 15px;">⏳ Inicializando modelo con Tracking en RTX 3060...</div>
+        <div style="font-weight: 700; font-size: 15px;">⏳ Inicializando modelo en RTX 3060...</div>
     </div>
     '''
     yield None, init_html, "Iniciando...", None, get_gpu_stats()
     
     model = get_model(model_name)
     device = 0 if torch.cuda.is_available() else "cpu"
-    classes_filter = [0] if filter_people else None
+    is_world_model = "world" in model_name.lower()
+    
+    classes_filter = None
+    if is_world_model:
+        if custom_classes_txt and custom_classes_txt.strip():
+            user_classes = [c.strip() for c in custom_classes_txt.split(",") if c.strip()]
+        else:
+            user_classes = ["box", "coffee box", "package"]
+        model.set_classes(user_classes)
+    elif filter_people:
+        classes_filter = [0]
     
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
@@ -209,8 +237,8 @@ def predict_video(video_path, model_name, conf_threshold, iou_threshold, imgsz, 
     frame_count = 0
     last_yield_time = 0
     
-    unique_person_ids = set()
-    current_person_count = 0
+    unique_ids = set()
+    current_count = 0
     
     while cap.isOpened():
         ret, frame = cap.read()
@@ -243,37 +271,20 @@ def predict_video(video_path, model_name, conf_threshold, iou_threshold, imgsz, 
             
         res = results[0]
         annotated_bgr = res.plot()
-        
-        names = model.names
         boxes = res.boxes
-        current_person_count = 0
+        current_count = len(boxes) if boxes is not None else 0
         
-        if boxes is not None and len(boxes) > 0:
-            classes = boxes.cls.cpu().numpy().astype(int)
-            ids = boxes.id.int().cpu().numpy().tolist() if (enable_tracking and boxes.id is not None) else None
+        if boxes is not None and boxes.id is not None and enable_tracking:
+            ids = boxes.id.int().cpu().numpy().tolist()
+            unique_ids.update(ids)
             
-            for i, c in enumerate(classes):
-                if names.get(c) == 'person':
-                    current_person_count += 1
-                    if ids is not None and i < len(ids):
-                        unique_person_ids.add(ids[i])
-                        
-        if filter_people:
-            if enable_tracking:
-                banner_lines = [
-                    f"Personas en cuadro: {current_person_count}",
-                    f"Personas unicas totales: {len(unique_person_ids)}"
-                ]
-            else:
-                banner_lines = [f"Personas en cuadro: {current_person_count}"]
+        if enable_tracking:
+            banner_lines = [
+                f"Objetos en cuadro: {current_count}",
+                f"Total unicos acumulados: {len(unique_ids)}"
+            ]
         else:
-            if enable_tracking and len(unique_person_ids) > 0:
-                banner_lines = [
-                    f"Personas en cuadro: {current_person_count}",
-                    f"Personas unicas: {len(unique_person_ids)}"
-                ]
-            else:
-                banner_lines = [f"Objetos en cuadro: {len(boxes) if boxes is not None else 0}"]
+            banner_lines = [f"Objetos en cuadro: {current_count}"]
                 
         draw_osd_banner(annotated_bgr, banner_lines)
         out.write(annotated_bgr)
@@ -290,7 +301,7 @@ def predict_video(video_path, model_name, conf_threshold, iou_threshold, imgsz, 
             eta_str = f"{int(eta_sec // 60)}m {int(eta_sec % 60):02d}s" if eta_sec >= 60 else f"{int(eta_sec)}s"
             elapsed_str = f"{int(elapsed_now // 60)}m {int(elapsed_now % 60):02d}s" if elapsed_now >= 60 else f"{int(elapsed_now)}s"
             
-            tracking_info = f"| 👥 <b style='color: #4ade80;'>{len(unique_person_ids)}</b> personas unicas" if enable_tracking else ""
+            tracking_info = f"| 🔢 <b style='color: #4ade80;'>{len(unique_ids)}</b> únicos" if enable_tracking else ""
             
             progress_html = f'''
             <div style="background: #0f172a; border-radius: 10px; padding: 16px; border: 1.5px solid #334155; box-shadow: 0 4px 10px rgba(0,0,0,0.3); font-family: system-ui, sans-serif;">
@@ -307,7 +318,7 @@ def predict_video(video_path, model_name, conf_threshold, iou_threshold, imgsz, 
                 </div>
             </div>
             '''
-            yield None, progress_html, f"Procesando... Personas únicas acumuladas: {len(unique_person_ids)}", None, get_gpu_stats()
+            yield None, progress_html, f"Procesando... Objetos únicos acumulados: {len(unique_ids)}", None, get_gpu_stats()
             
     cap.release()
     out.release()
@@ -335,7 +346,7 @@ def predict_video(video_path, model_name, conf_threshold, iou_threshold, imgsz, 
     avg_fps = frame_count / total_time if total_time > 0 else 0
     hora_actual = time.strftime("%H:%M:%S")
     
-    tracking_result_str = f"👥 <b style='color: #4ade80; font-size: 17px;'>Total personas únicas detectadas en todo el vídeo: {len(unique_person_ids)}</b><br>" if enable_tracking else ""
+    tracking_result_str = f"🔢 <b style='color: #4ade80; font-size: 17px;'>Total objetos únicos detectados en todo el vídeo: {len(unique_ids)}</b><br>" if enable_tracking else ""
     
     final_html = f'''
     <div style="background-color: #0d2315; border: 1.5px solid #22c55e; border-radius: 8px; padding: 16px 20px; font-family: system-ui, sans-serif; box-shadow: 0 4px 10px rgba(0,0,0,0.3);">
@@ -354,57 +365,77 @@ def predict_video(video_path, model_name, conf_threshold, iou_threshold, imgsz, 
     '''
     summary = (
         f"🎬 **Vídeo listo:** {frame_count} frames a {avg_fps:.1f} FPS en {total_time:.2f}s.\n\n"
-        f"👥 **Personas únicas acumuladas (Tracking):** {len(unique_person_ids)}\n\n"
+        f"🔢 **Objetos únicos acumulados (Tracking):** {len(unique_ids)}\n\n"
         f"📁 **Ruta en disco:** `{final_output}`"
     )
-    gr.Info(f"🎉 ¡Conteo completado! {len(unique_person_ids)} persona(s) única(s) identificadas.")
+    gr.Info(f"🎉 ¡Conteo completado! {len(unique_ids)} objeto(s) identificado(s).")
     yield final_output, final_html, summary, final_output, get_gpu_stats()
 
 # Lista de imágenes de prueba locales
 EXAMPLES = []
-for fname in ["bus.jpg", "zidane.jpg"]:
+for fname in ["bus.jpg", "zidane.jpg", "cafe_gondola.png"]:
     fpath = os.path.join(SAMPLES_DIR, fname)
     if os.path.exists(fpath):
-        EXAMPLES.append([fpath, "yolo26s.pt", 0.25, 0.45, 640, True])
+        if "cafe" in fname:
+            EXAMPLES.append([fpath, "yolov8m-worldv2.pt", 0.03, 0.45, 864, False, "box, coffee box, package"])
+        else:
+            EXAMPLES.append([fpath, "yolo26s.pt", 0.25, 0.45, 640, True, "box, coffee box, package"])
+
+def on_model_change(selected_model):
+    """Muestra u oculta la caja de texto libre si es YOLO-World y ajusta la confianza sugerida."""
+    is_world = "world" in selected_model.lower()
+    return (
+        gr.update(visible=is_world),
+        gr.update(value=0.03 if is_world else 0.25)
+    )
 
 # Interfaz Gradio
-with gr.Blocks(title="YOLO26 - RTX 3060 Demo") as demo:
+with gr.Blocks(title="YOLO26 & YOLO-World - RTX 3060 Demo") as demo:
     gr.Markdown(
         """
-        # 🚀 Ultralytics YOLO26 - Conteo y Detección en GPU
+        # 🚀 Ultralytics YOLO26 & YOLO-World - Conteo y Detección en GPU
         Acelerado en tiempo real por tu **NVIDIA GeForce RTX 3060 (12 GB VRAM)**.
-        Soporte para detección general y **Modo Conteo de Personas con Tracking de IDs únicos**.
+        - **YOLO26:** Detección general, conteo de personas y segmentación.
+        - **YOLO-World:** Detección de **Vocabulario Abierto (Open-Vocabulary)** para contar cajas de café, productos o cualquier objeto mediante texto libre.
         """
     )
     
     with gr.Row():
         with gr.Column(scale=1):
             model_dropdown = gr.Dropdown(
-                label="Modelo YOLO26 (Descargados localmente)",
+                label="Modelo de Visión Artificial",
                 choices=AVAILABLE_MODELS,
-                value="yolo26s.pt",
-                info="n: nano, s: small, m: medium, l: large, x: extra-large | -seg: segmentación | -pose: posturas"
+                value="yolov8m-worldv2.pt",
+                info="Selecciona YOLO26 (80 clases estándar) o YOLO-World (Texto Libre / Cajas / Productos)"
+            )
+            
+            custom_classes_input = gr.Textbox(
+                label="🔍 ¿Qué objetos quieres detectar/contar? (Texto libre)",
+                value="box, coffee box, package",
+                info="Escribe en inglés o español separado por comas (ej: 'box, coffee box, cup', 'bottle', etc.)",
+                visible=True
             )
             
             with gr.Group():
-                gr.Markdown("### 👥 Opciones de Conteo")
+                gr.Markdown("### 👥 Opciones de Conteo (YOLO Estándar)")
                 filter_people_chk = gr.Checkbox(
                     label="Contar SOLO personas (Filtrar clase 'person')",
-                    value=True,
-                    info="Filtra la detección para enfocarse exclusivamente en seres humanos."
+                    value=False,
+                    info="Filtra la detección para enfocarse exclusivamente en seres humanos (solo modelos YOLO26)."
                 )
                 enable_tracking_chk = gr.Checkbox(
                     label="Seguimiento / Tracking de IDs únicos (solo vídeo)",
                     value=True,
-                    info="Asigna un ID a cada persona para contar personas únicas acumuladas sin duplicados."
+                    info="Asigna un ID a cada objeto para contar unidades únicas acumuladas sin duplicados."
                 )
             
             conf_slider = gr.Slider(
-                minimum=0.05,
+                minimum=0.01,
                 maximum=1.0,
-                value=0.25,
-                step=0.05,
-                label="Umbral de Confianza (Confidence)"
+                value=0.03,
+                step=0.01,
+                label="Umbral de Confianza (Confidence)",
+                info="Recomendado: 0.03 a 0.08 para YOLO-World | 0.25 para YOLO26 estándar"
             )
             iou_slider = gr.Slider(
                 minimum=0.1,
@@ -414,19 +445,27 @@ with gr.Blocks(title="YOLO26 - RTX 3060 Demo") as demo:
                 label="Umbral de Solapamiento (IoU NMS)"
             )
             imgsz_radio = gr.Radio(
-                choices=[320, 640, 1024, 1280],
-                value=640,
-                label="Resolución de Entrada (imgsz)"
+                choices=[320, 640, 864, 1024, 1280],
+                value=864,
+                label="Resolución de Entrada (imgsz)",
+                info="Recomendado: 864 o 1280 para fotos de góndolas con productos pequeños"
             )
             gpu_info = gr.Markdown(value=get_gpu_stats)
             btn_refresh_gpu = gr.Button("🔄 Actualizar Telemetría GPU", size="sm")
             btn_refresh_gpu.click(fn=get_gpu_stats, outputs=[gpu_info])
             
+            # Cambiar visibilidad de caja de texto al cambiar de modelo
+            model_dropdown.change(
+                fn=on_model_change,
+                inputs=[model_dropdown],
+                outputs=[custom_classes_input, conf_slider]
+            )
+            
         with gr.Column(scale=2):
             with gr.Tabs():
                 with gr.TabItem("🖼️ Imagen"):
                     input_img = gr.Image(type="numpy", label="Subir Imagen o Seleccionar Ejemplo")
-                    btn_predict_img = gr.Button("👥 Contar Personas / Detectar", variant="primary", size="lg")
+                    btn_predict_img = gr.Button("🔍 Contar Objetos / Cajas", variant="primary", size="lg")
                     status_img = gr.HTML(
                         '<div style="background-color: #1e293b; color: #94a3b8; border: 1.5px solid #334155; padding: 12px 16px; border-radius: 8px; font-weight: 500;">⏸️ Estado: En espera de imagen...</div>'
                     )
@@ -437,16 +476,16 @@ with gr.Blocks(title="YOLO26 - RTX 3060 Demo") as demo:
                     if EXAMPLES:
                         gr.Examples(
                             examples=EXAMPLES,
-                            inputs=[input_img, model_dropdown, conf_slider, iou_slider, imgsz_radio, filter_people_chk],
+                            inputs=[input_img, model_dropdown, conf_slider, iou_slider, imgsz_radio, filter_people_chk, custom_classes_input],
                             outputs=[output_img, status_img, output_info, download_img_file, gpu_info],
                             fn=predict_image,
                             cache_examples=False,
-                            label="Ejemplos rápidos"
+                            label="Ejemplos rápidos (incluye tu foto de café)"
                         )
                     
                     btn_predict_img.click(
                         fn=predict_image,
-                        inputs=[input_img, model_dropdown, conf_slider, iou_slider, imgsz_radio, filter_people_chk],
+                        inputs=[input_img, model_dropdown, conf_slider, iou_slider, imgsz_radio, filter_people_chk, custom_classes_input],
                         outputs=[output_img, status_img, output_info, download_img_file, gpu_info],
                         show_progress="minimal"
                     )
@@ -458,7 +497,7 @@ with gr.Blocks(title="YOLO26 - RTX 3060 Demo") as demo:
                     
                     webcam_img.stream(
                         fn=predict_image,
-                        inputs=[webcam_img, model_dropdown, conf_slider, iou_slider, imgsz_radio, filter_people_chk],
+                        inputs=[webcam_img, model_dropdown, conf_slider, iou_slider, imgsz_radio, filter_people_chk, custom_classes_input],
                         outputs=[webcam_output, gr.HTML(visible=False), webcam_stats, gr.File(visible=False), gpu_info]
                     )
 
@@ -474,7 +513,7 @@ with gr.Blocks(title="YOLO26 - RTX 3060 Demo") as demo:
                     
                     btn_predict_vid.click(
                         fn=predict_video,
-                        inputs=[input_video, model_dropdown, conf_slider, iou_slider, imgsz_radio, filter_people_chk, enable_tracking_chk],
+                        inputs=[input_video, model_dropdown, conf_slider, iou_slider, imgsz_radio, filter_people_chk, enable_tracking_chk, custom_classes_input],
                         outputs=[output_video, status_vid, output_vid_info, download_video_file, gpu_info],
                         show_progress="minimal"
                     )
