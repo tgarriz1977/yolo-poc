@@ -5,8 +5,9 @@ FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Instalar ffmpeg y dependencias necesarias para procesamiento de vídeo y OpenCV
+# Instalar git, ffmpeg y dependencias necesarias para procesamiento de vídeo y OpenCV
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
     ffmpeg \
     libgl1 \
     libglib2.0-0 \
